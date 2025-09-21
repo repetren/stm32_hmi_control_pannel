@@ -60,6 +60,23 @@ void Error_Handler(void);
 #define BTN_UP_Pin GPIO_PIN_0
 #define BTN_UP_GPIO_Port GPIOC
 #define BTN_UP_EXTI_IRQn EXTI0_IRQn
+#define BTN_DOWN_Pin GPIO_PIN_1
+#define BTN_DOWN_GPIO_Port GPIOC
+#define BTN_DOWN_EXTI_IRQn EXTI1_IRQn
+#define BTN_LEFT_Pin GPIO_PIN_2
+#define BTN_LEFT_GPIO_Port GPIOC
+#define BTN_LEFT_EXTI_IRQn EXTI2_IRQn
+#define LIGHT_MODE_Pin GPIO_PIN_3
+#define LIGHT_MODE_GPIO_Port GPIOC
+#define LIGHT_MODE_EXTI_IRQn EXTI3_IRQn
+#define BTN_POT_MODE_Pin GPIO_PIN_4
+#define BTN_POT_MODE_GPIO_Port GPIOC
+#define BTN_POT_MODE_EXTI_IRQn EXTI4_IRQn
+#define BTN_RIGHT_Pin GPIO_PIN_5
+#define BTN_RIGHT_GPIO_Port GPIOC
+#define BTN_RIGHT_EXTI_IRQn EXTI9_5_IRQn
+#define LED_2_Pin GPIO_PIN_14
+#define LED_2_GPIO_Port GPIOB
 #define LED_1_Pin GPIO_PIN_15
 #define LED_1_GPIO_Port GPIOB
 
