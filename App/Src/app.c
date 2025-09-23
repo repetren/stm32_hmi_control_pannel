@@ -3,6 +3,7 @@
 #include "gpio.h"
 #include "adc.h"
 #include "i2c.h"
+#include "can.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -14,24 +15,33 @@
 volatile uint32_t btn_prev_tick[BUTTONS_AMOUNT]; // array for number of buttons
 
 // Potentiometer 
-volatile uint8_t pot_mode = 0;
 #define POT_RESOLUTION 4095
 #define ADC_BUF_LEN 1
+volatile uint8_t pot_mode = 0;
 uint16_t adc_buf[ADC_BUF_LEN];
 
 // Telemetry
 #define MAX_TEMP 100
-volatile uint8_t engine_temp = 0;
-volatile uint16_t rpm = 0;
-volatile uint16_t speed = 0;
+#define MAX_SPEED 280
 #define MAX_GEAR 8
 #define MIN_GEAR 0
-volatile uint8_t gear = 0;
+
+typedef struct
+{
+    volatile uint8_t gear;
+    uint8_t engine_temp;
+    uint16_t rpm;
+    uint16_t speed;
+
+} TelemetryData;
 
 // Lights objects
-volatile bool turn_left = false;
-volatile bool turn_right = false;
-volatile uint8_t light_mode = 0;
+typedef struct
+{
+    volatile bool turn_left;
+    volatile bool turn_right;
+    volatile uint8_t light_mode;
+} LightsData;
 
 // Fuel
 volatile uint16_t fuel_level = 0;
@@ -56,6 +66,14 @@ typedef struct
 EncoderData encoder_1 = {0};
 EncoderData encoder_2 = {0};
 
+volatile TelemetryData telemetry = {0};
+volatile LightsData lights = {0};
+
+CAN_TxHeaderTypeDef TxHeader;
+
+uint8_t TxData[8];
+uint32_t TxMailbox;
+
 // Function declaration 
 int16_t encoder_remap(EncoderData *enc, uint16_t encoder_angle, uint16_t range,
                       int16_t min, int16_t max);
@@ -67,13 +85,46 @@ void perephery_check();;
 void app()
 {
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
+    HAL_CAN_Start(&hcan1);
+    TxHeader.IDE = CAN_ID_STD;
+    TxHeader.RTR = CAN_RTR_DATA;
 
     while(1) {
         perephery_check();
         pot_read();
         encoders_read();
         uart_print();
-        // HAL_Delay(5);
+
+        TxHeader.DLC = 6;
+        TxHeader.StdId = 0x100;
+
+        TxData[0] = telemetry.gear;
+        TxData[1] = telemetry.speed >> 8 & 0xFF; // MSB
+        TxData[2] = telemetry.speed & 0xFF; // LSB
+        TxData[3] = telemetry.rpm >> 8 & 0xFF;
+        TxData[4] = telemetry.rpm & 0xFF;
+        TxData[5] = telemetry.engine_temp;
+
+        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+
+        TxHeader.DLC = 1;
+        TxHeader.StdId = 0x110;
+
+        TxData[0] = lights.turn_left << 7;
+        TxData[0] |= lights.turn_right << 6;
+        TxData[0] |= lights.light_mode << 4;
+
+        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+
+        TxHeader.DLC = 2;
+        TxHeader.StdId = 0x120;
+
+        TxData[0] = fuel_level >> 8 & 0xFF; // MSB
+        TxData[1] = fuel_level & 0xFF; // LSB
+
+        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+
+        HAL_Delay(100);
     }
 }
 
@@ -84,43 +135,43 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
         {
         case BTN_UP_Pin:
             if ((curr_tick - btn_prev_tick[0]) > DEBOUNCE_TRESHHOLD
-                && gear < MAX_GEAR) {
-                gear++;
+                && telemetry.gear < MAX_GEAR) {
+                telemetry.gear++;
                 btn_prev_tick[0] = curr_tick;
             }
             break;
         
         case BTN_DOWN_Pin:
             if ((curr_tick - btn_prev_tick[1]) > DEBOUNCE_TRESHHOLD
-                && gear > MIN_GEAR) {
-                gear--;
+                && telemetry.gear > MIN_GEAR) {
+                telemetry.gear--;
                 btn_prev_tick[1] = curr_tick;
             }
             break;
 
         case BTN_LEFT_Pin:
             if ((curr_tick - btn_prev_tick[2]) > DEBOUNCE_TRESHHOLD) {
-                turn_right = false;
-                turn_left = !turn_left;
+                lights.turn_right = false;
+                lights.turn_left = !lights.turn_left;
                 btn_prev_tick[2] = curr_tick;
             }
             break;
 
         case BTN_RIGHT_Pin:
             if ((curr_tick - btn_prev_tick[3]) > DEBOUNCE_TRESHHOLD) {
-                turn_left = false;
-                turn_right = !turn_right;
+                lights.turn_left = false;
+                lights.turn_right = !lights.turn_right;
                 btn_prev_tick[3] = curr_tick;
             }
             break;
 
         case LIGHT_MODE_Pin:
             if ((curr_tick - btn_prev_tick[4]) > DEBOUNCE_TRESHHOLD) {
-                if (light_mode >= 0 && light_mode < 3) {
-                    light_mode++;
+                if (lights.light_mode >= 0 && lights.light_mode < 3) {
+                    lights.light_mode++;
                 }
                 else {
-                    light_mode = 0;
+                    lights.light_mode = 0;
                 }
                 btn_prev_tick[4] = curr_tick;
             }
@@ -139,17 +190,17 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     }
 
 void perephery_check() {
-        const char *msg1 = "Encoder 1 not ready\r\n";
-        const char *msg2 = "Encoder 2 not ready\r\n";
+        static const char msg1[] = "Encoder 1 not ready\r\n";
+        static const char msg2[] = "Encoder 2 not ready\r\n";
 
         if (HAL_I2C_IsDeviceReady(&hi2c3, (ENC1_ADDR << 1), 1, 100) != HAL_OK) {
-            HAL_UART_Transmit(&huart2, (uint8_t*)msg1, sizeof(msg1), 100);
+            HAL_UART_Transmit(&huart2, (uint8_t*)msg1, sizeof(msg1) - 1, 200);
             
             // TROW CAN ERROR
         }
 
-        if (HAL_I2C_IsDeviceReady(&hi2c3, (ENC1_ADDR << 1), 1, 100) != HAL_OK) {
-            HAL_UART_Transmit(&huart2, (uint8_t*)msg2, sizeof(msg2), 100);
+        if (HAL_I2C_IsDeviceReady(&hi2c3, (ENC2_ADDR << 1), 1, 100) != HAL_OK) {
+            HAL_UART_Transmit(&huart2, (uint8_t*)msg2, sizeof(msg1) - 1, 200);
 
             // TROW CAN ERROR
         }
@@ -161,7 +212,7 @@ void pot_read() {
     HAL_GPIO_WritePin(LED_2_GPIO_Port, LED_2_Pin, !pot_mode);
 
     if (pot_mode) {
-        engine_temp = adc_buf[0] * MAX_TEMP / POT_RESOLUTION;
+        telemetry.engine_temp = adc_buf[0] * MAX_TEMP / POT_RESOLUTION;
     }
     else {
         fuel_level = adc_buf[0];
@@ -170,21 +221,21 @@ void pot_read() {
 
 void encoders_read() {
     HAL_I2C_Mem_Read(&hi2c3, (ENC1_ADDR << 1), ENC_REG_HIGH, I2C_MEMADD_SIZE_8BIT,
-                                &encoder_1.high_byte, 1, 100);
+                                &encoder_1.high_byte, 1, 5);
     HAL_I2C_Mem_Read(&hi2c3, (ENC1_ADDR << 1), ENC_REG_LOW, I2C_MEMADD_SIZE_8BIT,
-                                &encoder_1.low_byte, 1, 100);
+                                &encoder_1.low_byte, 1, 5);
     HAL_I2C_Mem_Read(&hi2c3, (ENC2_ADDR << 1), ENC_REG_HIGH, I2C_MEMADD_SIZE_8BIT,
-                                &encoder_2.high_byte, 1, 100);
+                                &encoder_2.high_byte, 1, 5);
     HAL_I2C_Mem_Read(&hi2c3, (ENC2_ADDR << 1), ENC_REG_LOW, I2C_MEMADD_SIZE_8BIT,
-                                &encoder_2.low_byte, 1, 100);
+                                &encoder_2.low_byte, 1, 5);
 
     uint16_t angle_encoder_1 = ((uint16_t)encoder_1.high_byte << 6
                                 | (encoder_1.low_byte & 0x3F));
     uint16_t angle_encoder_2 = ((uint16_t)encoder_2.high_byte << 6
                                 | (encoder_2.low_byte & 0x3F));
 
-    rpm = encoder_remap(&encoder_1, angle_encoder_1, 2048, 0, 4096);
-    speed = encoder_remap(&encoder_2, angle_encoder_2, 100, 0, 280);
+    telemetry.rpm = encoder_remap(&encoder_1, angle_encoder_1, 2048, 0, 4096);
+    telemetry.speed = encoder_remap(&encoder_2, angle_encoder_2, 100, 0, MAX_SPEED);
 }
 
 int16_t encoder_remap(EncoderData *enc, uint16_t encoder_angle, uint16_t range,
@@ -208,10 +259,14 @@ int16_t encoder_remap(EncoderData *enc, uint16_t encoder_angle, uint16_t range,
 void uart_print() {
     char msg[128];
     
-    snprintf(msg, sizeof(msg),
-    "G: %u, L: %i, R: %i, LM: %i, PM: %u, FL: %hu, ET: %u, E1: %u, E2: %u.\r\n",
-    gear, turn_left, turn_right, light_mode, pot_mode, fuel_level,
-    engine_temp, rpm, speed);
+    // snprintf(msg, sizeof(msg),
+    // "G: %u, L: %i, R: %i, LM: %i, PM: %u, FL: %hu, ET: %u, E1: %u, E2: %u.\r\n",
+    // gear, turn_left, turn_right, light_mode, pot_mode, fuel_level,
+    // engine_temp, rpm, speed);
+
+    // snprintf(msg, sizeof(msg),
+    // "Gear: %u, speed: %u , rpm: %u, engine temp: %u.\r\n",
+    // gear, speed, rpm, engine_temp);
 
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
 }
