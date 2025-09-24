@@ -4,6 +4,7 @@
 #include "adc.h"
 #include "i2c.h"
 #include "can.h"
+#include "tim.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -82,6 +83,16 @@ void pot_read();
 void encoders_read();
 void perephery_check();;
 
+void can_send_telemetry();
+void can_send_lights();
+void can_send_fuel();
+
+enum {
+    PERIOD_100HZ = 100,
+    PERIOD_50HZ = 200,
+    PERIOD_1HZ = 10000,
+};
+
 void app()
 {
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
@@ -89,42 +100,32 @@ void app()
     TxHeader.IDE = CAN_ID_STD;
     TxHeader.RTR = CAN_RTR_DATA;
 
+    HAL_TIM_Base_Start(&htim14);
+
+    uint16_t t100hz_last = __HAL_TIM_GET_COUNTER(&htim14);
+    uint16_t t50hz_last = __HAL_TIM_GET_COUNTER(&htim14);
+    uint16_t t1hz_last = __HAL_TIM_GET_COUNTER(&htim14);
+
     while(1) {
         perephery_check();
-        pot_read();
-        encoders_read();
-        uart_print();
+        // uart_print();
 
-        TxHeader.DLC = 6;
-        TxHeader.StdId = 0x100;
+        if (__HAL_TIM_GET_COUNTER(&htim14) - t100hz_last >= PERIOD_100HZ) {
+            encoders_read();
+            can_send_telemetry();
+            pot_read();
+            t100hz_last = __HAL_TIM_GET_COUNTER(&htim14);
+        }
 
-        TxData[0] = telemetry.gear;
-        TxData[1] = telemetry.speed >> 8 & 0xFF; // MSB
-        TxData[2] = telemetry.speed & 0xFF; // LSB
-        TxData[3] = telemetry.rpm >> 8 & 0xFF;
-        TxData[4] = telemetry.rpm & 0xFF;
-        TxData[5] = telemetry.engine_temp;
+        if (__HAL_TIM_GET_COUNTER(&htim14) - t50hz_last >= PERIOD_50HZ) {
+            can_send_lights();
+            t50hz_last = __HAL_TIM_GET_COUNTER(&htim14);
+        }
 
-        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-
-        TxHeader.DLC = 1;
-        TxHeader.StdId = 0x110;
-
-        TxData[0] = lights.turn_left << 7;
-        TxData[0] |= lights.turn_right << 6;
-        TxData[0] |= lights.light_mode << 4;
-
-        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-
-        TxHeader.DLC = 2;
-        TxHeader.StdId = 0x120;
-
-        TxData[0] = fuel_level >> 8 & 0xFF; // MSB
-        TxData[1] = fuel_level & 0xFF; // LSB
-
-        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-
-        HAL_Delay(100);
+        if (__HAL_TIM_GET_COUNTER(&htim14) - t1hz_last >= PERIOD_1HZ) {
+            can_send_fuel();
+            t1hz_last = __HAL_TIM_GET_COUNTER(&htim14);
+        }
     }
 }
 
@@ -269,4 +270,39 @@ void uart_print() {
     // gear, speed, rpm, engine_temp);
 
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+}
+
+void can_send_telemetry() {
+    TxHeader.DLC = 6;
+    TxHeader.StdId = 0x100;
+
+    TxData[0] = telemetry.gear;
+    TxData[1] = telemetry.speed >> 8 & 0xFF; // MSB
+    TxData[2] = telemetry.speed & 0xFF; // LSB
+    TxData[3] = telemetry.rpm >> 8 & 0xFF;
+    TxData[4] = telemetry.rpm & 0xFF;
+    TxData[5] = telemetry.engine_temp;
+
+    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+}
+
+void can_send_lights() {
+    TxHeader.DLC = 1;
+    TxHeader.StdId = 0x110;
+
+    TxData[0] = (lights.turn_left & 0x01) << 7;
+    TxData[0] |= (lights.turn_right & 0x01) << 6;
+    TxData[0] |= (lights.light_mode & 0x03) << 4;
+
+    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+}
+
+void can_send_fuel() {
+    TxHeader.DLC = 2;
+    TxHeader.StdId = 0x120;
+
+    TxData[0] = fuel_level >> 8 & 0xFF; // MSB
+    TxData[1] = fuel_level & 0xFF; // LSB
+
+    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
 }
