@@ -18,21 +18,44 @@ volatile uint32_t btn_prev_tick[BUTTONS_AMOUNT]; // array for number of buttons
 // Potentiometer 
 #define POT_RESOLUTION 4095
 #define ADC_BUF_LEN 1
+#define POT_DEAD_ZONE 25 // smoothing input values
+uint16_t pot_value = 0;
 volatile uint8_t pot_mode = 0;
 uint16_t adc_buf[ADC_BUF_LEN];
 
+// Notification
+enum Notification_type {
+    TELEMETRY = 1,
+    VEH_INFO = 2,
+    CONNECTION = 3,
+};
+
+enum Notification_status {
+    NOTI_CLEAR = 0,
+    NOTI_SET = 1,
+};
+
+typedef struct {
+    uint8_t type;
+    uint8_t code;
+    uint8_t status;
+    uint16_t last_tx;
+} Notification;
+
 // Telemetry
-#define MAX_TEMP 100
+#define MAX_TEMP 140
 #define MAX_SPEED 280
 #define MAX_GEAR 8
 #define MIN_GEAR 0
+#define CRITICAL_TEMP 120
 
 typedef struct
 {
     volatile uint8_t gear;
-    uint8_t engine_temp;
     uint16_t rpm;
     uint16_t speed;
+    uint8_t engine_temp;
+    uint8_t coolant_temp;
 
 } TelemetryData;
 
@@ -44,8 +67,18 @@ typedef struct
     volatile uint8_t light_mode;
 } LightsData;
 
-// Fuel
-volatile uint16_t fuel_level = 0;
+// Vehicle info
+uint32_t odo = 34500;
+uint16_t trip_a = 40;
+uint16_t fuel_level = 0;
+uint16_t fuel_range = 0;
+uint8_t engine_temp = 0;
+bool low_fuel_lamp = false;
+#define TANK_VOLUME 20
+#define FUEL_CONSUPTION 5
+#define CRITICAL_FUEL_LEVEL 2
+Notification low_fuel_allert = {VEH_INFO, 00, NOTI_CLEAR, 0};
+Notification engine_temp_allert = {VEH_INFO, 01, NOTI_CLEAR, 0};
 
 // I2C Encoders
 #define ENC1_ADDR     0x40
@@ -75,22 +108,27 @@ CAN_TxHeaderTypeDef TxHeader;
 uint8_t TxData[8];
 uint32_t TxMailbox;
 
-// Function declaration 
+// Function declarations
 int16_t encoder_remap(EncoderData *enc, uint16_t encoder_angle, uint16_t range,
                       int16_t min, int16_t max);
-void uart_print();
+// void uart_print();
 void pot_read();
 void encoders_read();
-void perephery_check();;
+void perephery_check();
 
 void can_send_telemetry();
 void can_send_lights();
 void can_send_fuel();
 
-enum {
-    PERIOD_100HZ = 100,
-    PERIOD_50HZ = 200,
-    PERIOD_1HZ = 10000,
+#define TIMER13_PER_SEC 5000
+#define TIMER13_PERIOD_10S (10 * TIMER13_PER_SEC)
+
+#define TIMER14_PER_SEC 10000
+
+enum Period {
+    PERIOD_100HZ = TIMER14_PER_SEC / 100,
+    PERIOD_50HZ = TIMER14_PER_SEC / 50,
+    PERIOD_25HZ = TIMER14_PER_SEC / 25,
 };
 
 void app()
@@ -101,14 +139,16 @@ void app()
     TxHeader.RTR = CAN_RTR_DATA;
 
     HAL_TIM_Base_Start(&htim14);
+    HAL_TIM_Base_Start(&htim13);
 
     uint16_t t100hz_last = __HAL_TIM_GET_COUNTER(&htim14);
     uint16_t t50hz_last = __HAL_TIM_GET_COUNTER(&htim14);
     uint16_t t1hz_last = __HAL_TIM_GET_COUNTER(&htim14);
 
     while(1) {
-        perephery_check();
         // uart_print();
+
+        vechicle_info();
 
         if (__HAL_TIM_GET_COUNTER(&htim14) - t100hz_last >= PERIOD_100HZ) {
             encoders_read();
@@ -122,8 +162,10 @@ void app()
             t50hz_last = __HAL_TIM_GET_COUNTER(&htim14);
         }
 
-        if (__HAL_TIM_GET_COUNTER(&htim14) - t1hz_last >= PERIOD_1HZ) {
+        if (__HAL_TIM_GET_COUNTER(&htim14) - t1hz_last >= PERIOD_25HZ) {
+            perephery_check();
             can_send_fuel();
+            can_send_veh_info();
             t1hz_last = __HAL_TIM_GET_COUNTER(&htim14);
         }
     }
@@ -212,11 +254,19 @@ void pot_read() {
     HAL_GPIO_WritePin(LED_1_GPIO_Port, LED_1_Pin, pot_mode);
     HAL_GPIO_WritePin(LED_2_GPIO_Port, LED_2_Pin, !pot_mode);
 
+    if (adc_buf[0] < pot_value
+    && pot_value - adc_buf[0] >= POT_DEAD_ZONE
+    || adc_buf[0] > pot_value
+    && adc_buf[0] + pot_value >= POT_DEAD_ZONE ) {
+
+    pot_value = adc_buf[0];
+    }
+
     if (pot_mode) {
-        telemetry.engine_temp = adc_buf[0] * MAX_TEMP / POT_RESOLUTION;
+        telemetry.engine_temp = pot_value * MAX_TEMP / POT_RESOLUTION;
     }
     else {
-        fuel_level = adc_buf[0];
+        fuel_level = pot_value;
     }
 }
 
@@ -265,15 +315,11 @@ void uart_print() {
     // gear, turn_left, turn_right, light_mode, pot_mode, fuel_level,
     // engine_temp, rpm, speed);
 
-    // snprintf(msg, sizeof(msg),
-    // "Gear: %u, speed: %u , rpm: %u, engine temp: %u.\r\n",
-    // gear, speed, rpm, engine_temp);
-
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
 }
 
 void can_send_telemetry() {
-    TxHeader.DLC = 6;
+    TxHeader.DLC = 7;
     TxHeader.StdId = 0x100;
 
     TxData[0] = telemetry.gear;
@@ -282,6 +328,7 @@ void can_send_telemetry() {
     TxData[3] = telemetry.rpm >> 8 & 0xFF;
     TxData[4] = telemetry.rpm & 0xFF;
     TxData[5] = telemetry.engine_temp;
+    TxData[6] = telemetry.coolant_temp;
 
     HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
 }
@@ -298,11 +345,77 @@ void can_send_lights() {
 }
 
 void can_send_fuel() {
-    TxHeader.DLC = 2;
+    TxHeader.DLC = 6;
     TxHeader.StdId = 0x120;
 
     TxData[0] = fuel_level >> 8 & 0xFF; // MSB
     TxData[1] = fuel_level & 0xFF; // LSB
+    TxData[2] = FUEL_CONSUPTION;
+    TxData[3] = fuel_range >> 8 & 0xFF;
+    TxData[4] = fuel_range & 0xFF;
+    TxData[5] = low_fuel_lamp;
 
     HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+}
+
+void can_notification(Notification *noti, uint8_t status) {
+    uint16_t now = (uint16_t)__HAL_TIM_GET_COUNTER(&htim13);
+    uint16_t elapsed = (uint16_t)now - noti->last_tx;
+    
+    if (noti->status != status || elapsed >= TIMER13_PERIOD_10S) {
+        noti->status = status;
+
+        TxHeader.DLC = 3;
+        TxHeader.StdId = 0x130;
+
+        TxData[0] = noti->type;
+        TxData[1] = noti->code;
+        TxData[2] = noti->status;
+
+        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+
+        noti->last_tx = __HAL_TIM_GET_COUNTER(&htim13);
+    }
+}  
+
+void can_send_veh_info() {
+    TxHeader.DLC = 6;
+    TxHeader.StdId = 0x121;
+
+    TxData[0] = odo >> 24 & 0xFF; // MSB
+    TxData[1] = odo >> 16 & 0xFF; // LSB
+    TxData[2] = odo >> 8 & 0xFF;
+    TxData[3] = odo & 0xFF;
+    TxData[4] = trip_a >> 8 & 0xFF;
+    TxData[5] = trip_a & 0xFF;
+
+    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+}
+
+void vechicle_info() {
+
+    //Fuel range and fuel level notification handler
+    float fuel_level_liters = (float)fuel_level * TANK_VOLUME / 4096.0;
+    fuel_range = fuel_level_liters / (float)FUEL_CONSUPTION * 100;
+
+    if (fuel_level_liters < CRITICAL_FUEL_LEVEL) {
+        can_notification(&low_fuel_allert, NOTI_SET);
+        low_fuel_lamp = true;
+    }
+    else if (fuel_level_liters > CRITICAL_FUEL_LEVEL && low_fuel_allert.status == 1)
+    {
+        can_notification(&low_fuel_allert, NOTI_CLEAR);
+        low_fuel_lamp = false;
+    }
+
+    // Engine temp notification handler
+    telemetry.coolant_temp = (uint8_t)(telemetry.engine_temp * 0.8);
+
+    if(telemetry.engine_temp >= CRITICAL_TEMP) {
+        can_notification(&engine_temp_allert, NOTI_SET);
+    } 
+    else if (telemetry.engine_temp < CRITICAL_TEMP && engine_temp_allert.status == 1) {
+        can_notification(&engine_temp_allert, NOTI_CLEAR);
+    }
+    
 }
