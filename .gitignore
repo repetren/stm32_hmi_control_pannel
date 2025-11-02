@@ -6,3 +6,6 @@ build.ninja
 .mxproject
 .vscode/
 .DS_Store
+.cache/clangd/ 
+.settings/ 
+compile_commands.json 
