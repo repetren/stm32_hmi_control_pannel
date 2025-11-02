@@ -106,7 +106,9 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  app();
+
+  app(); // Main app function
+  
   while (1)
   {
     /* USER CODE END WHILE */

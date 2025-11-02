@@ -1,129 +1,73 @@
-#include "app.h"
-#include "usart.h"
-#include "gpio.h"
-#include "adc.h"
-#include "i2c.h"
-#include "can.h"
-#include "tim.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
+#include "app.h"
+#include "gpio.h"
+#include "adc.h"
+#include "i2c.h"
+#include "can.h"
+#include "tim.h"
+#include "usart.h"
+
+#include "constants.h"
+#include "encoder_utils.h"
+#include "send_CAN_utils.h"
+
 // Debounce
-#define DEBOUNCE_TRESHHOLD 200 // in milliseconds
-#define BUTTONS_AMOUNT 6
-volatile uint32_t btn_prev_tick[BUTTONS_AMOUNT]; // array for number of buttons
+typedef enum {
+    BTN_UP_ID,
+    BTN_DOWN_ID,
+    BTN_LEFT_ID,
+    BTN_RIGHT_ID,
+    LIGHT_MODE_ID,
+    BTN_POT_MODE_ID,
+    BUTTONS_NUM,
+} ButtonId;
+
+volatile uint32_t btn_prev_tick[BUTTONS_NUM] = {0}; // array for buttons timestemps
 
 // Potentiometer 
-#define POT_RESOLUTION 4095
-#define ADC_BUF_LEN 1
-#define POT_DEAD_ZONE 25 // smoothing input values
 uint16_t pot_value = 0;
 volatile uint8_t pot_mode = 0;
-uint16_t adc_buf[ADC_BUF_LEN];
-
-// Notification
-enum Notification_type {
-    TELEMETRY = 1,
-    VEH_INFO = 2,
-    CONNECTION = 3,
-};
-
-enum Notification_status {
-    NOTI_CLEAR = 0,
-    NOTI_SET = 1,
-};
-
-typedef struct {
-    uint8_t type;
-    uint8_t code;
-    uint8_t status;
-    uint16_t last_tx;
-} Notification;
-
-// Telemetry
-#define MAX_TEMP 140
-#define MAX_SPEED 280
-#define MAX_GEAR 8
-#define MIN_GEAR 0
-#define CRITICAL_TEMP 120
-
-typedef struct
-{
-    volatile uint8_t gear;
-    uint16_t rpm;
-    uint16_t speed;
-    uint8_t engine_temp;
-    uint8_t coolant_temp;
-
-} TelemetryData;
-
-// Lights objects
-typedef struct
-{
-    volatile bool turn_left;
-    volatile bool turn_right;
-    volatile uint8_t light_mode;
-} LightsData;
-
-// Vehicle info
-uint32_t odo = 34500;
-uint16_t trip_a = 40;
-uint16_t fuel_level = 0;
-uint16_t fuel_range = 0;
-uint8_t engine_temp = 0;
-bool low_fuel_lamp = false;
-#define TANK_VOLUME 20
-#define FUEL_CONSUPTION 5
-#define CRITICAL_FUEL_LEVEL 2
-Notification low_fuel_allert = {VEH_INFO, 00, NOTI_CLEAR, 0};
-Notification engine_temp_allert = {VEH_INFO, 01, NOTI_CLEAR, 0};
-
-// I2C Encoders
-#define ENC1_ADDR     0x40
-#define ENC2_ADDR     0x41
-#define ENC_REG_HIGH  0xFE
-#define ENC_REG_LOW   0xFF
-
-HAL_StatusTypeDef ecnoder_1_state;
-HAL_StatusTypeDef encoder_2_state;
-
-typedef struct
-{
-    uint8_t high_byte;
-    uint8_t low_byte;
-    int16_t old_step;
-    int16_t output;
-} EncoderData;
-
-EncoderData encoder_1 = {0};
-EncoderData encoder_2 = {0};
+volatile uint16_t adc_buf[ADC_BUF_LEN] = {0};
 
 volatile TelemetryData telemetry = {0};
 volatile LightsData lights = {0};
 
-CAN_TxHeaderTypeDef TxHeader;
+static Notification low_fuel_alert = {
+    VEH_INFO,
+    LOW_FUEL_NOTIF_CODE,
+    NOTI_CLEAR,
+    0};
+static Notification engine_temp_alert = {
+    VEH_INFO,
+    HIGH_ENGINE_TEMP_NOTIF_CODE,
+    NOTI_CLEAR,
+    0};
 
-uint8_t TxData[8];
-uint32_t TxMailbox;
+VehicleInfo info = {
+    .odo = DEMO_ODO,
+    .trip_a = TRIP_A_DEMO,
+    .fuel_level = 0,
+    .fuel_range = 0,
+    .low_fuel_lamp = false,
+};
+
+EncoderData encoder_1 = {0};
+EncoderData encoder_2 = {0};
 
 // Function declarations
-int16_t encoder_remap(EncoderData *enc, uint16_t encoder_angle, uint16_t range,
-                      int16_t min, int16_t max);
+
 // void uart_print();
 void pot_read();
 void encoders_read();
 void perephery_check();
 
-void can_send_telemetry();
-void can_send_lights();
-void can_send_fuel();
-
-#define TIMER13_PER_SEC 5000
-#define TIMER13_PERIOD_10S (10 * TIMER13_PER_SEC)
-
-#define TIMER14_PER_SEC 10000
+void vechicle_info();
+float fuel_level_to_liters(uint16_t fuel_level);
 
 enum Period {
     PERIOD_100HZ = TIMER14_PER_SEC / 100,
@@ -135,8 +79,6 @@ void app()
 {
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
     HAL_CAN_Start(&hcan1);
-    TxHeader.IDE = CAN_ID_STD;
-    TxHeader.RTR = CAN_RTR_DATA;
 
     HAL_TIM_Base_Start(&htim14);
     HAL_TIM_Base_Start(&htim13);
@@ -145,27 +87,27 @@ void app()
     uint16_t t50hz_last = __HAL_TIM_GET_COUNTER(&htim14);
     uint16_t t1hz_last = __HAL_TIM_GET_COUNTER(&htim14);
 
-    while(1) {
+    while(true) {
         // uart_print();
 
         vechicle_info();
 
         if (__HAL_TIM_GET_COUNTER(&htim14) - t100hz_last >= PERIOD_100HZ) {
             encoders_read();
-            can_send_telemetry();
+            send_CAN_telemetry(&telemetry);
             pot_read();
             t100hz_last = __HAL_TIM_GET_COUNTER(&htim14);
         }
 
         if (__HAL_TIM_GET_COUNTER(&htim14) - t50hz_last >= PERIOD_50HZ) {
-            can_send_lights();
+            send_CAN_light(&lights);
             t50hz_last = __HAL_TIM_GET_COUNTER(&htim14);
         }
 
         if (__HAL_TIM_GET_COUNTER(&htim14) - t1hz_last >= PERIOD_25HZ) {
             perephery_check();
-            can_send_fuel();
-            can_send_veh_info();
+            send_CAN_fuel(&info);
+            send_CAN_veh_info(&info);
             t1hz_last = __HAL_TIM_GET_COUNTER(&htim14);
         }
     }
@@ -177,53 +119,53 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
         switch (GPIO_Pin)
         {
         case BTN_UP_Pin:
-            if ((curr_tick - btn_prev_tick[0]) > DEBOUNCE_TRESHHOLD
+            if ((curr_tick - btn_prev_tick[BTN_UP_ID]) > DEBOUNCE_TRESHHOLD
                 && telemetry.gear < MAX_GEAR) {
                 telemetry.gear++;
-                btn_prev_tick[0] = curr_tick;
+                btn_prev_tick[BTN_UP_ID] = curr_tick;
             }
             break;
         
         case BTN_DOWN_Pin:
-            if ((curr_tick - btn_prev_tick[1]) > DEBOUNCE_TRESHHOLD
+            if ((curr_tick - btn_prev_tick[BTN_DOWN_ID]) > DEBOUNCE_TRESHHOLD
                 && telemetry.gear > MIN_GEAR) {
                 telemetry.gear--;
-                btn_prev_tick[1] = curr_tick;
+                btn_prev_tick[BTN_DOWN_ID] = curr_tick;
             }
             break;
 
         case BTN_LEFT_Pin:
-            if ((curr_tick - btn_prev_tick[2]) > DEBOUNCE_TRESHHOLD) {
+            if ((curr_tick - btn_prev_tick[BTN_LEFT_ID]) > DEBOUNCE_TRESHHOLD) {
                 lights.turn_right = false;
                 lights.turn_left = !lights.turn_left;
-                btn_prev_tick[2] = curr_tick;
+                btn_prev_tick[BTN_LEFT_ID] = curr_tick;
             }
             break;
 
         case BTN_RIGHT_Pin:
-            if ((curr_tick - btn_prev_tick[3]) > DEBOUNCE_TRESHHOLD) {
+            if ((curr_tick - btn_prev_tick[BTN_RIGHT_ID]) > DEBOUNCE_TRESHHOLD) {
                 lights.turn_left = false;
                 lights.turn_right = !lights.turn_right;
-                btn_prev_tick[3] = curr_tick;
+                btn_prev_tick[BTN_RIGHT_ID] = curr_tick;
             }
             break;
 
         case LIGHT_MODE_Pin:
-            if ((curr_tick - btn_prev_tick[4]) > DEBOUNCE_TRESHHOLD) {
+            if ((curr_tick - btn_prev_tick[LIGHT_MODE_ID]) > DEBOUNCE_TRESHHOLD) {
                 if (lights.light_mode >= 0 && lights.light_mode < 3) {
                     lights.light_mode++;
                 }
                 else {
                     lights.light_mode = 0;
                 }
-                btn_prev_tick[4] = curr_tick;
+                btn_prev_tick[LIGHT_MODE_ID] = curr_tick;
             }
             break;
 
         case BTN_POT_MODE_Pin:
-            if ((curr_tick - btn_prev_tick[5] > DEBOUNCE_TRESHHOLD)) {
+            if ((curr_tick - btn_prev_tick[BTN_POT_MODE_ID] > DEBOUNCE_TRESHHOLD)) {
                 pot_mode = !pot_mode;
-                btn_prev_tick[5] = curr_tick;
+                btn_prev_tick[BTN_POT_MODE_ID] = curr_tick;
             }
             break;
 
@@ -238,14 +180,10 @@ void perephery_check() {
 
         if (HAL_I2C_IsDeviceReady(&hi2c3, (ENC1_ADDR << 1), 1, 100) != HAL_OK) {
             HAL_UART_Transmit(&huart2, (uint8_t*)msg1, sizeof(msg1) - 1, 200);
-            
-            // TROW CAN ERROR
         }
 
         if (HAL_I2C_IsDeviceReady(&hi2c3, (ENC2_ADDR << 1), 1, 100) != HAL_OK) {
-            HAL_UART_Transmit(&huart2, (uint8_t*)msg2, sizeof(msg1) - 1, 200);
-
-            // TROW CAN ERROR
+            HAL_UART_Transmit(&huart2, (uint8_t*)msg2, sizeof(msg2) - 1, 200);
         }
 }
 
@@ -254,19 +192,15 @@ void pot_read() {
     HAL_GPIO_WritePin(LED_1_GPIO_Port, LED_1_Pin, pot_mode);
     HAL_GPIO_WritePin(LED_2_GPIO_Port, LED_2_Pin, !pot_mode);
 
-    if (adc_buf[0] < pot_value
-    && pot_value - adc_buf[0] >= POT_DEAD_ZONE
-    || adc_buf[0] > pot_value
-    && adc_buf[0] + pot_value >= POT_DEAD_ZONE ) {
-
-    pot_value = adc_buf[0];
+    if (abs(adc_buf[0] - pot_value) >= POT_DEAD_ZONE) {
+        pot_value = adc_buf[0];
     }
 
     if (pot_mode) {
         telemetry.engine_temp = pot_value * MAX_TEMP / POT_RESOLUTION;
     }
     else {
-        fuel_level = pot_value;
+        info.fuel_level = pot_value;
     }
 }
 
@@ -289,133 +223,47 @@ void encoders_read() {
     telemetry.speed = encoder_remap(&encoder_2, angle_encoder_2, 100, 0, MAX_SPEED);
 }
 
-int16_t encoder_remap(EncoderData *enc, uint16_t encoder_angle, uint16_t range,
-                      int16_t min, int16_t max) {
-    uint16_t step = (uint32_t)encoder_angle * range / 16384;
-
-    int16_t diff = enc->old_step - step;
-
-    if (step != enc->old_step && abs(diff) < range / 2) {
-        enc->output += diff;
-    }
-
-    enc->old_step = step;
-
-    if (enc->output > max) enc->output = max;
-    else if (enc->output < min) enc->output = min;
-
-    return enc->output;
-}
-
 void uart_print() {
-    char msg[128];
+    // char msg[128];
     
     // snprintf(msg, sizeof(msg),
     // "G: %u, L: %i, R: %i, LM: %i, PM: %u, FL: %hu, ET: %u, E1: %u, E2: %u.\r\n",
     // gear, turn_left, turn_right, light_mode, pot_mode, fuel_level,
     // engine_temp, rpm, speed);
 
-    HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
-}
-
-void can_send_telemetry() {
-    TxHeader.DLC = 7;
-    TxHeader.StdId = 0x100;
-
-    TxData[0] = telemetry.gear;
-    TxData[1] = telemetry.speed >> 8 & 0xFF; // MSB
-    TxData[2] = telemetry.speed & 0xFF; // LSB
-    TxData[3] = telemetry.rpm >> 8 & 0xFF;
-    TxData[4] = telemetry.rpm & 0xFF;
-    TxData[5] = telemetry.engine_temp;
-    TxData[6] = telemetry.coolant_temp;
-
-    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-}
-
-void can_send_lights() {
-    TxHeader.DLC = 1;
-    TxHeader.StdId = 0x110;
-
-    TxData[0] = (lights.turn_left & 0x01) << 7;
-    TxData[0] |= (lights.turn_right & 0x01) << 6;
-    TxData[0] |= (lights.light_mode & 0x03) << 4;
-
-    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-}
-
-void can_send_fuel() {
-    TxHeader.DLC = 6;
-    TxHeader.StdId = 0x120;
-
-    TxData[0] = fuel_level >> 8 & 0xFF; // MSB
-    TxData[1] = fuel_level & 0xFF; // LSB
-    TxData[2] = FUEL_CONSUPTION;
-    TxData[3] = fuel_range >> 8 & 0xFF;
-    TxData[4] = fuel_range & 0xFF;
-    TxData[5] = low_fuel_lamp;
-
-    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-}
-
-void can_notification(Notification *noti, uint8_t status) {
-    uint16_t now = (uint16_t)__HAL_TIM_GET_COUNTER(&htim13);
-    uint16_t elapsed = (uint16_t)now - noti->last_tx;
-    
-    if (noti->status != status || elapsed >= TIMER13_PERIOD_10S) {
-        noti->status = status;
-
-        TxHeader.DLC = 3;
-        TxHeader.StdId = 0x130;
-
-        TxData[0] = noti->type;
-        TxData[1] = noti->code;
-        TxData[2] = noti->status;
-
-        HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-
-        noti->last_tx = __HAL_TIM_GET_COUNTER(&htim13);
-    }
-}  
-
-void can_send_veh_info() {
-    TxHeader.DLC = 6;
-    TxHeader.StdId = 0x121;
-
-    TxData[0] = odo >> 24 & 0xFF; // MSB
-    TxData[1] = odo >> 16 & 0xFF; // LSB
-    TxData[2] = odo >> 8 & 0xFF;
-    TxData[3] = odo & 0xFF;
-    TxData[4] = trip_a >> 8 & 0xFF;
-    TxData[5] = trip_a & 0xFF;
-
-    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+    // HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
 }
 
 void vechicle_info() {
 
     //Fuel range and fuel level notification handler
-    float fuel_level_liters = (float)fuel_level * TANK_VOLUME / 4096.0;
-    fuel_range = fuel_level_liters / (float)FUEL_CONSUPTION * 100;
+    float fuel_level_liters = fuel_level_to_liters(info.fuel_level);
+    info.fuel_range = fuel_level_liters / (float)FUEL_CONSUPTION * 100;
 
-    if (fuel_level_liters < CRITICAL_FUEL_LEVEL) {
-        can_notification(&low_fuel_allert, NOTI_SET);
-        low_fuel_lamp = true;
+    if (fuel_level_liters <= CRITICAL_FUEL_LEVEL) {
+        send_CAN_notification(&low_fuel_alert, NOTI_SET);
+        info.low_fuel_lamp = true;
     }
-    else if (fuel_level_liters > CRITICAL_FUEL_LEVEL && low_fuel_allert.status == 1)
+    // Clear notification only once to prevent repeating CAN sending
+    else if (fuel_level_liters > CRITICAL_FUEL_LEVEL && low_fuel_alert.status == 1)
     {
-        can_notification(&low_fuel_allert, NOTI_CLEAR);
-        low_fuel_lamp = false;
+        send_CAN_notification(&low_fuel_alert, NOTI_CLEAR);
+        info.low_fuel_lamp = false;
     }
 
     // Engine temp notification handler
     telemetry.coolant_temp = (uint8_t)(telemetry.engine_temp * 0.8);
 
     if(telemetry.engine_temp >= CRITICAL_TEMP) {
-        can_notification(&engine_temp_allert, NOTI_SET);
+        send_CAN_notification(&engine_temp_alert, NOTI_SET);
     } 
-    else if (telemetry.engine_temp < CRITICAL_TEMP && engine_temp_allert.status == 1) {
-        can_notification(&engine_temp_allert, NOTI_CLEAR);
+    // Clear notification only once to prevent repeating CAN sending
+    else if (telemetry.engine_temp < CRITICAL_TEMP && engine_temp_alert.status == 1) {
+        send_CAN_notification(&engine_temp_alert, NOTI_CLEAR);
     }
     
+}
+
+float fuel_level_to_liters(uint16_t fuel_level) {
+    return (float)info.fuel_level * TANK_VOLUME / 4096.0;
 }

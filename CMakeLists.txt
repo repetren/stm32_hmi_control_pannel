@@ -33,6 +33,11 @@ enable_language(C ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+add_executable(test_remap
+    App/Tests/test_remap.c
+    App/Src/remap.c
+    App/Tests/unity.c
+)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
@@ -45,10 +50,20 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "App/Src/app.c"
+    "App/Src/encoder_utils.c"
+    "App/Src/send_CAN_utils.c"
+)
+
+target_sources(test_remap PRIVATE
+    "App/Src/remap.c"
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    "App/Inc"
+)
+
+target_include_directories(test_remap PRIVATE
     "App/Inc"
 )
 

@@ -1,5 +1,5 @@
 #ifndef __APP_H__
-#define __APP_H_
+#define __APP_H__
 
 #include <stdint.h>
 void app();
