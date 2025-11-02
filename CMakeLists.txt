@@ -52,6 +52,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "App/Src/app.c"
     "App/Src/encoder_utils.c"
     "App/Src/send_CAN_utils.c"
+    "App/Src/throw_notification.c"
+    "App/Src/fuel_and_temp_utils.c"
 )
 
 target_sources(test_remap PRIVATE

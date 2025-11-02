@@ -1,15 +1,18 @@
 #ifndef __SEND_CAN_UTILS_H__
 #define __SEND_CAN_UTILS_H__
 
+#include <stdint.h>
+
 #include "constants.h"
 #include <stdbool.h>
 
 // Vehicle info
 typedef struct {
-    uint32_t odo;
-    uint16_t trip_a;
-    uint16_t fuel_level;
-    uint16_t fuel_range;
+    uint32_t odo;         //km
+    uint16_t trip_a;      // km
+    uint16_t fuel_level;  // from potentiometer
+    uint16_t fuel_range;  // km
+    uint16_t fuel_liters; // l
     bool low_fuel_lamp;
 } VehicleInfo;
 

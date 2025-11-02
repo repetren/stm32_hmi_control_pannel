@@ -1,7 +1,7 @@
 #ifndef __CONSTANTS_H__
 #define __CONSTANTS_H__
 
-#define DEBOUNCE_TRESHHOLD 200 // in milliseconds
+#define DEBOUNCE_THRESHOLD 200 // in milliseconds
 
 #define TANK_VOLUME 20
 #define FUEL_CONSUPTION 5
